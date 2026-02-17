@@ -15,7 +15,7 @@ using namespace mDNSResolver;
 #define SERVO_PIN 13
 #define BUTTON_PIN 5
 #define LED_PIN 1
-#define NUM_PIXELS 50
+#define NUM_PIXELS 38
 #define DEBOUNCE_TIME 50
 #define COLOR_SAT 255
 
@@ -41,11 +41,12 @@ using namespace mDNSResolver;
 // game about to end
 #define MSG_GAME_END 'e'
 
+// common colors
 RgbColor red(COLOR_SAT, 0, 0);
 RgbColor green(0, COLOR_SAT, 0);
 RgbColor blue(0, 0, COLOR_SAT);
 RgbColor white(COLOR_SAT);
-RgbColor black(0);
+RgbColor black(0);  // off
 
 Servo servo;
 NeoPixelBus<NeoBrgFeature, NeoWs2811Method> strip(NUM_PIXELS);
@@ -54,6 +55,7 @@ int last_bounce_state = LOW;
 int button_state = HIGH;
 unsigned long last_debounce = 0;
 int anim_state = ANIM_STATE_IDLE;
+unsigned long anim_frame = 0;
 
 WiFiClient espWiFiClient;
 PubSubClient mqttClient(espWiFiClient);
@@ -82,9 +84,25 @@ void drop_anim(bool reverse) {
     }
 }
 
-void load_anim() {
+void load_anim_start() {
     clear_leds();
 
+    // fade in initial blue colour
+    for (int step = 0; step <= 7; step++) {
+        int sat = (COLOR_SAT + 1) >> (7 - step);
+        RgbColor color(0, 0, sat - 1);
+
+        for (int pix = 0; pix < NUM_PIXELS; pix++) {
+            strip.SetPixelColor(pix, color);
+        }
+        strip.Show();
+
+        delay(42);
+    }
+}
+
+void load_anim_end() {
+    // trail that "eats" the previous blue colour
     for (int i = 0; i < NUM_PIXELS; i++) {
         // this fades to purple, although divs are slow
         uint16_t r = (i == 0 ? 0 : (uint16_t)(((float)i / (float)NUM_PIXELS) * (float)COLOR_SAT));
@@ -115,6 +133,8 @@ void anim() {
         case ANIM_STATE_END:
             break;
     }
+
+    anim_frame++;
 }
 
 void drop_cube() {
@@ -131,9 +151,12 @@ void drop_cube() {
 
 void load_cube() {
     Serial.println("loading cube");
-    load_anim();
+
+    load_anim_start();
     servo.write(0);
-    delay(1000);
+    load_anim_end();
+
+    delay(500);
 }
 
 void callback(char* topic, byte* payload, unsigned int length) {
@@ -152,14 +175,17 @@ void callback(char* topic, byte* payload, unsigned int length) {
             break;
         case MSG_GAME_IDLE:
             anim_state = ANIM_STATE_IDLE;
+            anim_frame = 0;
             Serial.println("idle game state");
             break;
         case MSG_GAME_ACTIVE:
             anim_state = ANIM_STATE_ACTIVE;
+            anim_frame = 0;
             Serial.println("active game state");
             break;
         case MSG_GAME_END:
             anim_state = ANIM_STATE_END;
+            anim_frame = 0;
             Serial.println("end game state");
             break;
     }
