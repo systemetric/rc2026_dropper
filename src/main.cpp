@@ -26,6 +26,21 @@ using namespace mDNSResolver;
 #define STATE_NET 1
 #define STATE_MQTT 2
 
+#define ANIM_STATE_IDLE 0
+#define ANIM_STATE_ACTIVE 1
+#define ANIM_STATE_END 2
+
+// trigger cube load (door close)
+#define MSG_LOAD 'l'
+// trigger cube drop (door open)
+#define MSG_DROP 'd'
+// before game start
+#define MSG_GAME_IDLE 'i'
+// during game
+#define MSG_GAME_ACTIVE 'a'
+// game about to end
+#define MSG_GAME_END 'e'
+
 RgbColor red(COLOR_SAT, 0, 0);
 RgbColor green(0, COLOR_SAT, 0);
 RgbColor blue(0, 0, COLOR_SAT);
@@ -38,6 +53,7 @@ NeoPixelBus<NeoBrgFeature, NeoWs2811Method> strip(NUM_PIXELS);
 int last_bounce_state = LOW;
 int button_state = HIGH;
 unsigned long last_debounce = 0;
+int anim_state = ANIM_STATE_IDLE;
 
 WiFiClient espWiFiClient;
 PubSubClient mqttClient(espWiFiClient);
@@ -59,17 +75,15 @@ void drop_anim(bool reverse) {
     }
 }
 
-void default_anim() {
-    /*
-    for (int i = 0; i < NUM_PIXELS; i++) {
-        if (button_state == HIGH) {
-            strip.SetPixelColor(i, red);
-        } else {
-            strip.SetPixelColor(i, green);
-        }
+void anim() {
+    switch (anim_state) {
+        case ANIM_STATE_IDLE:
+            break;
+        case ANIM_STATE_ACTIVE:
+            break;
+        case ANIM_STATE_END:
+            break;
     }
-
-    strip.Show();*/
 }
 
 void clear_leds() {
@@ -80,15 +94,20 @@ void clear_leds() {
     strip.Show();
 }
 
-void drop_servo() {
+void drop_cube() {
+    Serial.println("dropping cube");
+
     drop_anim(false);
+
     servo.write(180);
     delay(1000);
+
     drop_anim(true);
     clear_leds();
 }
 
-void load_servo() {
+void load_cube() {
+    Serial.println("loading cube");
     servo.write(0);
     delay(1000);
 }
@@ -99,10 +118,26 @@ void callback(char* topic, byte* payload, unsigned int length) {
     if (length < 1)
         return;
 
-    if ((char)payload[0] == '1') {
-        drop_servo();
-    } else if ((char)payload[0] == '0') {
-        load_servo();
+    // just use single chars for messages
+    switch ((char)payload[0]) {
+        case MSG_LOAD:
+            load_cube();
+            break;
+        case MSG_DROP:
+            drop_cube();
+            break;
+        case MSG_GAME_IDLE:
+            anim_state = ANIM_STATE_IDLE;
+            Serial.println("idle game state");
+            break;
+        case MSG_GAME_ACTIVE:
+            anim_state = ANIM_STATE_ACTIVE;
+            Serial.println("active game state");
+            break;
+        case MSG_GAME_END:
+            anim_state = ANIM_STATE_END;
+            Serial.println("end game state");
+            break;
     }
 }
 
@@ -123,9 +158,10 @@ void set_net_led_state(int state) {
 }
 
 void wifi_reconnect() {
-
     set_net_led_state(STATE_BOOT);
 
+    Serial.print("wifi ");
+    Serial.println(WIFI_SSID);
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
     }
@@ -136,22 +172,20 @@ void wifi_reconnect() {
 void mqtt_reconnect() {
     set_net_led_state(STATE_NET);
 
-    Serial.println("START MQTT");
-
     while (!mqttClient.connected()) {
-        String clientId = "RC2026_DROPPER_" + String(DROPPER_ID);
+        String clientId = "dropper" + String(DROPPER_ID);
 
         if (mqttClient.connect(clientId.c_str())) {
             String topic = "dropper/" + String(DROPPER_ID);
             mqttClient.subscribe(topic.c_str());
         } else {
+            Serial.println("mqtt failed");
             // connection failed, wait 2s
             delay(2000);
         }
     }
 
-    Serial.println("GOT MQTT");
-
+    Serial.println("mqtt connected");
     set_net_led_state(STATE_MQTT);
 }
 
@@ -160,7 +194,6 @@ void setup() {
 
     strip.Begin();
     clear_leds();
-    strip.Show();
 
     servo.attach(SERVO_PIN);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -168,25 +201,31 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     wifi_reconnect();
-    Serial.println("GOT WIFI");
+    Serial.println("wifi connected");
 
+    // broadcast mdns name `dropperX`
     String name = "dropper" + String(DROPPER_ID);
     MDNS.begin(name.c_str());
-    Serial.println("GOT MDNS");
 
     // mqtt host uses mdns, resolve to ip
-    Serial.println(MQTT_SERVER);
     resolver.setLocalIP(WiFi.localIP());
     IPAddress mqttIp;
     do {
         mqttIp = resolver.search(MQTT_SERVER);
     } while (mqttIp == INADDR_NONE);
 
+    // i don't think there's a vararg version of this
+    Serial.print("mqtt broker: ");
+    Serial.print(MQTT_SERVER);
+    Serial.print(", ");
     Serial.println(mqttIp);
+
     mqttClient.setServer(mqttIp, 1883);
     mqttClient.setCallback(callback);
 
-    load_servo();
+    // open servo initially for cube load
+    servo.write(180);
+    delay(1000);
 }
 
 void loop() {
@@ -201,8 +240,9 @@ void loop() {
     mqttClient.loop();
     resolver.loop();
 
-    default_anim();
+    anim();
 
+    // button debounced to avoid false presses
     button_state = digitalRead(BUTTON_PIN);
     if (button_state != last_bounce_state) {
         last_debounce = millis();
@@ -210,7 +250,8 @@ void loop() {
     }
 
     if ((millis() - last_debounce) > DEBOUNCE_TIME && button_state == LOW) {
-        load_servo();
+        Serial.println("load button pressed");
+        load_cube();
     }
 
     // 50 iter/sec
