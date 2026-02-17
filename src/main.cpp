@@ -15,9 +15,9 @@ using namespace mDNSResolver;
 #define SERVO_PIN 13
 #define BUTTON_PIN 5
 #define LED_PIN 1
-#define NUM_PIXELS 100
+#define NUM_PIXELS 50
 #define DEBOUNCE_TIME 50
-#define COLOR_SAT 128
+#define COLOR_SAT 255
 
 #define DROPPER_ID "0"
 #define MQTT_SERVER "Wills-ThinkPad.local"
@@ -60,10 +60,17 @@ PubSubClient mqttClient(espWiFiClient);
 WiFiUDP udp;
 Resolver resolver(udp);
 
+void clear_leds() {
+    for (int i = 0; i < NUM_PIXELS; i++) {
+        strip.SetPixelColor(i, black);
+    }
+
+    strip.Show();
+}
+
 void drop_anim(bool reverse) {
     for (int step = 0; step <= 7; step++) {
-        int sat = 256 >> (reverse ? step : (7 - step));
-
+        int sat = (COLOR_SAT + 1) >> (reverse ? step : (7 - step));
         RgbColor color(sat - 1, 0, sat - 1);
 
         for (int pix = 0; pix < NUM_PIXELS; pix++) {
@@ -75,6 +82,30 @@ void drop_anim(bool reverse) {
     }
 }
 
+void load_anim() {
+    clear_leds();
+
+    for (int i = 0; i < NUM_PIXELS; i++) {
+        // this fades to purple, although divs are slow
+        uint16_t r = (i == 0 ? 0 : (uint16_t)(((float)i / (float)NUM_PIXELS) * (float)COLOR_SAT));
+        RgbColor color(r, 0, COLOR_SAT);
+
+        strip.SetPixelColor(i, color);
+
+        if (i - 3 >= 0) {
+            strip.SetPixelColor(i - 3, black);
+        }
+
+        strip.Show();
+        delay(42);
+    }
+
+    for (int i = NUM_PIXELS - 4; i < NUM_PIXELS; i++) {
+        strip.SetPixelColor(i, black);
+    }
+    strip.Show();
+}
+
 void anim() {
     switch (anim_state) {
         case ANIM_STATE_IDLE:
@@ -84,14 +115,6 @@ void anim() {
         case ANIM_STATE_END:
             break;
     }
-}
-
-void clear_leds() {
-    for (int i = 0; i < NUM_PIXELS; i++) {
-        strip.SetPixelColor(i, black);
-    }
-
-    strip.Show();
 }
 
 void drop_cube() {
@@ -108,6 +131,7 @@ void drop_cube() {
 
 void load_cube() {
     Serial.println("loading cube");
+    load_anim();
     servo.write(0);
     delay(1000);
 }
