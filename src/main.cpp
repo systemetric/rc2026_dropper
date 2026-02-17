@@ -1,50 +1,76 @@
 #include <Arduino.h>
+#include <NeoPixelBus.h>
 #include <Servo.h>
 
-Servo servos[4];
-int next_drop = 0;
+#define SERVO_PIN 13
+#define BUTTON_PIN 5
+#define LED_PIN 1
+#define NUM_PIXELS 6
+#define DEBOUNCE_TIME 50
 
-void setup_servos() {
-    servos[0].attach(D0);
-    servos[0].write(0);
+#define COLOR_SAT 128
 
-    servos[1].attach(D1);
-    servos[1].write(0);
+RgbColor red(COLOR_SAT, 0, 0);
+RgbColor green(0, COLOR_SAT, 0);
+RgbColor blue(0, 0, COLOR_SAT);
+RgbColor white(COLOR_SAT);
+RgbColor black(0);
 
-    servos[2].attach(D2);
-    servos[2].write(0);
+const uint16_t PixelCount = 4;
 
-    servos[3].attach(D3);
-    servos[3].write(0);
+Servo servo;
+NeoPixelBus<NeoGrbFeature, NeoWs2811Method> strip(PixelCount);
 
+int last_bounce_state = LOW;
+int button_state = HIGH;
+unsigned long last_debounce = 0;
+
+void drop() {
+    servo.write(180);
     delay(1000);
 }
 
-void activate_servo(Servo *servo) {
-    servo->write(180);
+void load() {
+    servo.write(0);
     delay(1000);
-    servo->write(0);
-    delay(500);
 }
 
-void drop_cube() {
-    if (next_drop >= 4)
-        return;
+void anim() {
+    for (int i = 0; i < NUM_PIXELS; i++) {
+        if (button_state == HIGH) {
+            strip.SetPixelColor(i, red);
+        } else {
+            strip.SetPixelColor(i, green);
+        }
+    }
 
-    activate_servo(&servos[next_drop]);
-    next_drop++;
-}
-
-void reset() {
-    next_drop = 0;
+    strip.Show();
 }
 
 void setup() {
-    setup_servos();
-    reset();
+    strip.Begin();
+    strip.Show();
+
+    servo.attach(SERVO_PIN);
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+    load();
+    drop();
 }
 
 void loop() {
-    drop_cube();
-    delay(3000);
+    anim();
+
+    button_state = digitalRead(BUTTON_PIN);
+    if (button_state != last_bounce_state) {
+        last_debounce = millis();
+        last_bounce_state = button_state;
+    }
+
+    if ((millis() - last_debounce) > DEBOUNCE_TIME && button_state == LOW) {
+        load();
+    }
+
+    // 50 iter/sec
+    delay(20);
 }
