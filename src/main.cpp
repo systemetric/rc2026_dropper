@@ -125,13 +125,44 @@ void load_anim_end() {
 }
 
 void anim() {
+    // things in here run 50 times per second
+    // don't add delays
     switch (anim_state) {
         case ANIM_STATE_IDLE:
             break;
         case ANIM_STATE_ACTIVE:
-            break;
+            {
+                clear_leds();
+
+                int start = anim_frame % NUM_PIXELS;
+
+                float r = COLOR_SAT * abs(sin((float)anim_frame / (float)16));
+                float g = COLOR_SAT * abs(sin((float)anim_frame / (float)16 + (float)25));
+                float b = COLOR_SAT * abs(sin((float)anim_frame / (float)16 + (float)50));
+
+                // precompute saturations here
+                float sats[5] = {0.15, 0.35, 1, 0.35, 0.15};
+
+                for (int i = 0; i < 5; i++) {
+                    RgbColor color(r * sats[i], g * sats[i], b * sats[i]);
+                    strip.SetPixelColor((start + i) % NUM_PIXELS, color);
+                }
+
+                strip.Show();
+                break;
+            }
         case ANIM_STATE_END:
-            break;
+            {
+                uint16_t sat = COLOR_SAT * abs(sin((float)anim_frame / (float)16));
+                RgbColor color(sat, 0, 0);
+
+                for (int i = 0; i < NUM_PIXELS; i++) {
+                    strip.SetPixelColor(i, color);
+                }
+
+                strip.Show();
+                break;
+            }
     }
 
     anim_frame++;
