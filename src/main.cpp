@@ -20,7 +20,10 @@ using namespace mDNSResolver;
 #define COLOR_SAT 255
 
 #define DROPPER_ID "0"
-#define MQTT_SERVER "Wills-ThinkPad.local"
+#define MQTT_SERVER "RoboCon-Arena.lan"
+
+#define OPEN 0
+#define CLOSED 1
 
 #define STATE_BOOT 0
 #define STATE_NET 1
@@ -34,6 +37,8 @@ using namespace mDNSResolver;
 #define MSG_LOAD 'l'
 // trigger cube drop (door open)
 #define MSG_DROP 'd'
+// trigger gate toggle
+#define MSG_TOGGLE 't'
 // before game start
 #define MSG_GAME_IDLE 'i'
 // during game
@@ -56,11 +61,13 @@ int button_state = HIGH;
 unsigned long last_debounce = 0;
 int anim_state = ANIM_STATE_IDLE;
 unsigned long anim_frame = 0;
+short gate_state = OPEN;
 
 WiFiClient espWiFiClient;
 PubSubClient mqttClient(espWiFiClient);
 WiFiUDP udp;
 Resolver resolver(udp);
+IPAddress mqttIp = INADDR_NONE;
 
 void clear_leds() {
     for (int i = 0; i < NUM_PIXELS; i++) {
@@ -155,6 +162,7 @@ void drop_cube() {
     drop_anim(false);
 
     servo.write(180);
+    gate_state = OPEN;
     delay(1000);
 
     drop_anim(true);
@@ -165,8 +173,24 @@ void load_cube() {
     Serial.println("loading cube");
 
     load_anim_start();
+
     servo.write(0);
+    gate_state = CLOSED;
+    delay(1000);
+
     load_anim_end();
+}
+
+void toggle_gate() {
+    if (gate_state == OPEN) {
+        Serial.println("closing gate");
+        servo.write(0);
+        gate_state = CLOSED;
+    } else {
+        Serial.println("opening gate");
+        servo.write(180);
+        gate_state = OPEN;
+    }
 
     delay(500);
 }
@@ -184,6 +208,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
             break;
         case MSG_DROP:
             drop_cube();
+            break;
+        case MSG_TOGGLE:
+            toggle_gate();
             break;
         case MSG_GAME_IDLE:
             anim_state = ANIM_STATE_IDLE;
@@ -220,35 +247,36 @@ void set_net_led_state(int state) {
 }
 
 void wifi_reconnect() {
-    set_net_led_state(STATE_BOOT);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
 
     Serial.print("wifi ");
     Serial.println(WIFI_SSID);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-    }
 
-    set_net_led_state(STATE_NET);
+    // broadcast mdns name `dropperX`
+    String name = "dropper" + String(DROPPER_ID);
+    MDNS.begin(name.c_str());
+}
+
+void mqtt_resolve() {
+    resolver.setLocalIP(WiFi.localIP());
+    mqttIp = resolver.search(MQTT_SERVER);
 }
 
 void mqtt_reconnect() {
-    set_net_led_state(STATE_NET);
+    Serial.print("mqtt broker @ ");
+    Serial.println(MQTT_SERVER);
+    Serial.println(", ");
+    Serial.println(mqttIp);
 
-    while (!mqttClient.connected()) {
-        String clientId = "dropper" + String(DROPPER_ID);
+    String clientId = "dropper" + String(DROPPER_ID);
 
-        if (mqttClient.connect(clientId.c_str())) {
-            String topic = "dropper/" + String(DROPPER_ID);
-            mqttClient.subscribe(topic.c_str());
-        } else {
-            Serial.println("mqtt failed");
-            // connection failed, wait 2s
-            delay(2000);
-        }
+    if (mqttClient.connect(clientId.c_str())) {
+        String topic = "dropper/" + String(DROPPER_ID);
+        mqttClient.subscribe(topic.c_str());
+    } else {
+        Serial.println("mqtt failed");
     }
-
-    Serial.println("mqtt connected");
-    set_net_led_state(STATE_MQTT);
 }
 
 void setup() {
@@ -260,47 +288,40 @@ void setup() {
     servo.attach(SERVO_PIN);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    wifi_reconnect();
-    Serial.println("wifi connected");
+    // open servo initially for cube load
+    servo.write(180);
+    gate_state = OPEN;
+    delay(1000);
+}
 
-    // broadcast mdns name `dropperX`
-    String name = "dropper" + String(DROPPER_ID);
-    MDNS.begin(name.c_str());
+void _loop() {
+    // network checks
 
-    // mqtt host uses mdns, resolve to ip
-    resolver.setLocalIP(WiFi.localIP());
-    IPAddress mqttIp;
-    do {
-        mqttIp = resolver.search(MQTT_SERVER);
-    } while (mqttIp == INADDR_NONE);
+    set_net_led_state(STATE_BOOT);
 
-    // i don't think there's a vararg version of this
-    Serial.print("mqtt broker: ");
-    Serial.print(MQTT_SERVER);
-    Serial.print(", ");
-    Serial.println(mqttIp);
+    if (WiFi.status() != WL_CONNECTED) {
+        wifi_reconnect();
+        return;
+    }
+
+    set_net_led_state(STATE_NET);
+
+    if (mqttIp == INADDR_NONE) {
+        mqtt_resolve();
+        return;
+    }
 
     mqttClient.setServer(mqttIp, 1883);
     mqttClient.setCallback(callback);
 
-    // open servo initially for cube load
-    servo.write(180);
-    delay(1000);
-}
-
-void loop() {
-    if (WiFi.status() != WL_CONNECTED) {
-        wifi_reconnect();
-    }
-
     if (!mqttClient.connected()) {
         mqtt_reconnect();
+        return;
     }
 
-    mqttClient.loop();
-    resolver.loop();
+    set_net_led_state(STATE_MQTT);
+
+    // network is good, continue as normal
 
     anim();
 
@@ -313,9 +334,15 @@ void loop() {
 
     if ((millis() - last_debounce) > DEBOUNCE_TIME && button_state == LOW) {
         Serial.println("load button pressed");
-        load_cube();
+        toggle_gate();
     }
 
     // 50 iter/sec
     delay(20);
+}
+
+void loop() {
+    _loop();
+    mqttClient.loop();
+    resolver.loop();
 }
