@@ -17,65 +17,102 @@ using namespace mDNSResolver;
 #define LED_PIN 1
 #define NUM_PIXELS 38
 #define DEBOUNCE_TIME 50
-#define COLOR_SAT 255
 
 #define DROPPER_ID "0"
-#define MQTT_SERVER "RoboCon-Arena.lan"
+#define HOSTNAME ("Dropper" DROPPER_ID)
+#define ARENA_NAME "RoboCon-Arena.local"
 
 #define OPEN 0
 #define CLOSED 1
 
-#define STATE_BOOT 0
-#define STATE_NET 1
-#define STATE_MQTT 2
-
-#define ANIM_STATE_IDLE 0
-#define ANIM_STATE_ACTIVE 1
-#define ANIM_STATE_END 2
-
-// trigger cube load (door close)
-#define MSG_LOAD 'l'
-// trigger cube drop (door open)
-#define MSG_DROP 'd'
-// trigger gate toggle
-#define MSG_TOGGLE 't'
-// before game start
-#define MSG_GAME_IDLE 'i'
-// during game
-#define MSG_GAME_ACTIVE 'a'
-// game about to end
-#define MSG_GAME_END 'e'
-
 // common colors
-RgbColor red(COLOR_SAT, 0, 0);
-RgbColor green(0, COLOR_SAT, 0);
-RgbColor blue(0, 0, COLOR_SAT);
-RgbColor white(COLOR_SAT);
-RgbColor black(0);  // off
+RgbColor red(255, 0, 0);
+RgbColor orange(255, 0, 125);
+RgbColor yellow(255, 0, 192);
+RgbColor notify_yellow(255, 0, 255);
+RgbColor spring_green(125, 0, 255);
+RgbColor green(0, 0, 255);
+RgbColor teal(0, 128, 128);
+RgbColor turquoise(0, 125, 255);
+RgbColor cyan(0, 255, 255);
+RgbColor ocean(0, 255, 128);
+RgbColor blue(0, 128, 0); // was 256!
+RgbColor violet(125, 255, 0);
+RgbColor magenta(255, 255, 0);
+RgbColor raspberry(255, 128, 0);
+RgbColor white(255, 255, 255);
+RgbColor black(0, 0, 0);
+
+// zone color for this dropper
+#define ZONE_COLOR (red) // (yellow), (green), (blue)
 
 Servo servo;
 NeoPixelBus<NeoBrgFeature, NeoWs2811Method> strip(NUM_PIXELS);
 
-int last_bounce_state = LOW;
-int button_state = HIGH;
 unsigned long last_debounce = 0;
-int anim_state = ANIM_STATE_IDLE;
-unsigned long anim_frame = 0;
+int last_debounce_state = HIGH;
+int button_state = HIGH;
+unsigned long start_time = 0;
 short gate_state = OPEN;
+char msg[50];
+char topic[50];
 
-WiFiClient espWiFiClient;
-PubSubClient mqttClient(espWiFiClient);
+// this defines which order droppers activate
+short drop_order = 0;
+
+enum {
+    running = 0,
+    stopped
+} led_state = stopped;
+
+enum {
+    not_connected,
+    find_mdns,
+    mqtt_connected,
+    mqtt_established
+} wifi_state = not_connected;
+
+WiFiClient espClient;
+PubSubClient client(espClient);
 WiFiUDP udp;
 Resolver resolver(udp);
-IPAddress mqttIp = INADDR_NONE;
+IPAddress ip = INADDR_NONE;
 
-void clear_leds() {
-    for (int i = 0; i < NUM_PIXELS; i++) {
-        strip.SetPixelColor(i, black);
-    }
+// servo routines
 
-    strip.Show();
+void drop_cube() {
+    servo.write(180);
+    gate_state = OPEN;
 }
+
+void load_cube() {
+    servo.write(0);
+    gate_state = CLOSED;
+}
+
+void toggle_gate() {
+    if (gate_state == OPEN) {
+        servo.write(0);
+        gate_state = CLOSED;
+    } else {
+        servo.write(180);
+        gate_state = OPEN;
+    }
+}
+
+// LED routines
+
+void set_led_black() {
+    for (int i = 0; i < NUM_PIXELS; i++)
+        strip.SetPixelColor(i, black);
+}
+
+void set_led_zones() {
+    for (int i = 0; i < NUM_PIXELS; i++)
+        strip.SetPixelColor(i, ZONE_COLOR);
+}
+
+/* old animations
 
 void drop_anim(bool reverse) {
     for (int step = 0; step <= 7; step++) {
@@ -156,134 +193,61 @@ void anim() {
     anim_frame++;
 }
 
-void drop_cube() {
-    Serial.println("dropping cube");
+*/
 
-    drop_anim(false);
 
-    servo.write(180);
-    gate_state = OPEN;
-    delay(1000);
+void mqtt_callback(char* topic, byte* payload, unsigned int length) {
+    Serial.print("Message arrived [");
+    Serial.print(topic);
+    Serial.print("] ");
+    for (unsigned int i = 0; i < length; i++) {
+        Serial.print((char)payload[i]);
+    }
+    Serial.println();
 
-    drop_anim(true);
-    clear_leds();
-}
-
-void load_cube() {
-    Serial.println("loading cube");
-
-    load_anim_start();
-
-    servo.write(0);
-    gate_state = CLOSED;
-    delay(1000);
-
-    load_anim_end();
-}
-
-void toggle_gate() {
-    if (gate_state == OPEN) {
-        Serial.println("closing gate");
-        servo.write(0);
-        gate_state = CLOSED;
-    } else {
-        Serial.println("opening gate");
-        servo.write(180);
-        gate_state = OPEN;
+    if (strncmp((char *)payload, "run", length) == 0) {
+        led_state = running;
+        start_time = millis();
     }
 
-    delay(500);
-}
-
-void callback(char* topic, byte* payload, unsigned int length) {
-    // we only subscribed to one topic, no need to check
-
-    if (length < 1)
-        return;
-
-    // just use single chars for messages
-    switch ((char)payload[0]) {
-        case MSG_LOAD:
-            load_cube();
-            break;
-        case MSG_DROP:
-            drop_cube();
-            break;
-        case MSG_TOGGLE:
-            toggle_gate();
-            break;
-        case MSG_GAME_IDLE:
-            anim_state = ANIM_STATE_IDLE;
-            anim_frame = 0;
-            Serial.println("idle game state");
-            break;
-        case MSG_GAME_ACTIVE:
-            anim_state = ANIM_STATE_ACTIVE;
-            anim_frame = 0;
-            Serial.println("active game state");
-            break;
-        case MSG_GAME_END:
-            anim_state = ANIM_STATE_END;
-            anim_frame = 0;
-            Serial.println("end game state");
-            break;
-    }
-}
-
-void set_net_led_state(int state) {
-    switch (state) {
-        case STATE_BOOT:
-            strip.SetPixelColor(0, red);
-            break;
-        case STATE_NET:
-            strip.SetPixelColor(0, blue);
-            break;
-        case STATE_MQTT:
-            strip.SetPixelColor(0, green);
-            break;
+    if (strncmp((char *)payload, "zones", length) == 0) {
+        led_state = stopped;
+        set_led_zones();
     }
 
+    if (strncmp((char *)payload, "stop", length) == 0 ) {
+        led_state = stopped;
+        set_led_black();
+    }
+
+    if (*((char*)payload) == 'o' && length > 1) {
+        drop_order = *((char *)(payload + 1)) - '0';
+    }
+
+    // update the LED strip
     strip.Show();
 }
 
-void wifi_reconnect() {
+void setup() {
+    WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    WiFi.hostname(HOSTNAME);
 
+    Serial.begin(115200);
+
+    // init wifi
+    Serial.println();
     Serial.print("wifi ");
     Serial.println(WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
 
-    // broadcast mdns name `dropperX`
-    String name = "dropper" + String(DROPPER_ID);
-    MDNS.begin(name.c_str());
-}
-
-void mqtt_resolve() {
-    resolver.setLocalIP(WiFi.localIP());
-    mqttIp = resolver.search(MQTT_SERVER);
-}
-
-void mqtt_reconnect() {
-    Serial.print("mqtt broker @ ");
-    Serial.println(MQTT_SERVER);
-    Serial.println(", ");
-    Serial.println(mqttIp);
-
-    String clientId = "dropper" + String(DROPPER_ID);
-
-    if (mqttClient.connect(clientId.c_str())) {
-        String topic = "dropper/" + String(DROPPER_ID);
-        mqttClient.subscribe(topic.c_str());
-    } else {
-        Serial.println("mqtt failed");
-    }
-}
-
-void setup() {
-    Serial.begin(9600);
-
+    // init LED strip(s)
     strip.Begin();
-    clear_leds();
+    strip.Show();
+    set_led_black();
+    strip.SetPixelColor(0, red);
+    strip.Show();
+    start_time = millis();
 
     servo.attach(SERVO_PIN);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -291,58 +255,111 @@ void setup() {
     // open servo initially for cube load
     servo.write(180);
     gate_state = OPEN;
-    delay(1000);
-}
-
-void _loop() {
-    // network checks
-
-    set_net_led_state(STATE_BOOT);
-
-    if (WiFi.status() != WL_CONNECTED) {
-        wifi_reconnect();
-        return;
-    }
-
-    set_net_led_state(STATE_NET);
-
-    if (mqttIp == INADDR_NONE) {
-        mqtt_resolve();
-        return;
-    }
-
-    mqttClient.setServer(mqttIp, 1883);
-    mqttClient.setCallback(callback);
-
-    if (!mqttClient.connected()) {
-        mqtt_reconnect();
-        return;
-    }
-
-    set_net_led_state(STATE_MQTT);
-
-    // network is good, continue as normal
-
-    anim();
-
-    // button debounced to avoid false presses
-    button_state = digitalRead(BUTTON_PIN);
-    if (button_state != last_bounce_state) {
-        last_debounce = millis();
-        last_bounce_state = button_state;
-    }
-
-    if ((millis() - last_debounce) > DEBOUNCE_TIME && button_state == LOW) {
-        Serial.println("load button pressed");
-        toggle_gate();
-    }
-
-    // 50 iter/sec
-    delay(20);
+    delay(500);
 }
 
 void loop() {
-    _loop();
-    mqttClient.loop();
-    resolver.loop();
+
+    // Deal with wifi and MQTT if connected
+
+    // Connectity State Machine
+    switch (wifi_state) {
+        case not_connected:
+            strip.SetPixelColor(0, red);
+            strip.Show();
+            if (WiFi.status() == WL_CONNECTED) {
+                randomSeed(micros());
+                ip = WiFi.localIP();
+                Serial.println("ip: ");
+                Serial.println(ip);
+                wifi_state = find_mdns;
+            }
+            break;
+        case find_mdns:
+        {
+            strip.SetPixelColor(0, blue);
+            strip.Show();
+            IPAddress RC_A_ip = resolver.search(ARENA_NAME);
+            if (RC_A_ip != INADDR_NONE) {
+                // init MQTT
+                Serial.print("arena: ");
+                Serial.println(RC_A_ip);
+                client.setServer(RC_A_ip, 1883);
+                client.setCallback(mqtt_callback);
+                wifi_state = mqtt_connected;
+            } else
+                Serial.println("Cannot find mdns for Arena");
+        }
+        case mqtt_connected:
+            // connect to mqtt
+            strip.SetPixelColor(0, yellow);
+            strip.Show();
+            if (client.connected()) {
+                Serial.print("mqtt established");
+                wifi_state = mqtt_established;
+                strip.SetPixelColor(0, green);
+                strip.Show();
+            } else {
+                // Attempt to connect
+                if (client.connect(HOSTNAME)) {
+                    // Once connected, publish an announcement...
+                    snprintf(topic, 50, "tele/%s/STATE", HOSTNAME);
+                    snprintf(msg, 50, "tele/%s/STATE {\"ip\":\"%d.%d.%d.%d\"}", HOSTNAME, ip[0], ip[1], ip[2], ip[3]);
+                    client.publish(topic, msg);
+                    snprintf(topic, 50, "cmnd/%s", HOSTNAME);
+                    client.subscribe(topic);
+                }
+            }
+            break;
+        case mqtt_established:
+            if (client.connected()) {
+                // run mqtt tasks
+                client.loop();
+            } else {
+                Serial.print("mqtt failed");
+                if (WiFi.status() == WL_CONNECTED)
+                    wifi_state = find_mdns;
+                else
+                    wifi_state = not_connected;
+            }
+            break;
+    }
+
+    // LED state machine
+
+    int round_time = millis() - start_time;
+
+    switch (led_state) {
+        case running:
+            // <insert idle anim here>
+
+            // 60, 80, 100, ...
+            if ((round_time / 1000) >= ((drop_order * 20 + 60)) && gate_state == CLOSED) {
+                Serial.println("dropping cube");
+                drop_cube();
+            }
+            break;
+        default:
+            break;
+    }
+
+    for (int i = 0; i < NUM_PIXELS; i++)
+        strip.SetPixelColor(i, red);
+    
+    strip.Show();
+
+    Serial.println("loop");
+
+    // handle button presses
+
+    button_state = digitalRead(BUTTON_PIN);
+    // button pressed is LOW, button not pressed is HIGH
+    if (button_state == LOW && last_debounce_state == HIGH) {
+        last_debounce = millis();
+        last_debounce_state = LOW;
+        Serial.println("button pressed");
+        toggle_gate();
+    }
+    if ((millis() - last_debounce) > DEBOUNCE_TIME && button_state == HIGH)
+        last_debounce_state = HIGH;
 }
